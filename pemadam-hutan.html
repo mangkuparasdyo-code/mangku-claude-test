@@ -24,11 +24,11 @@
 }
 :root{box-sizing:border-box;padding-top:env(safe-area-inset-top,0px);padding-bottom:env(safe-area-inset-bottom,0px)}
 *,*::before,*::after{box-sizing:inherit}
-html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px)}
+html{height:100%;scroll-padding-top:env(safe-area-inset-top,0px);overscroll-behavior:none}
 body{
   margin:0;height:100%;background:var(--bg);color:var(--ink);
   font-family:Fredoka,"Trebuchet MS",system-ui,sans-serif;font-weight:500;
-  display:flex;flex-direction:column;overflow:hidden;
+  display:flex;flex-direction:column;overflow:hidden;overscroll-behavior:none;
   -webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent;
 }
 [hidden]{display:none !important}
@@ -159,7 +159,14 @@ body{
 (() => {
 'use strict';
 
-/* ---------- konstanta ---------- */
+/* ---------- konstanta ----------
+   Catatan penyetelan (diuji dengan bot, 8 ronde per konfigurasi, desktop dan portrait):
+   - BASE tetap 0,2. Menurunkannya (0,16-0,17) tidak memperpanjang ronde: api lebih sering padam
+     sendiri, ronde tetap ~45-55 detik, hanya lebih mudah.
+   - CD tetap 2,2 detik. 2,6-3,0 detik hanya mempersulit pemain tanpa memperpanjang ronde.
+   - Titik api awal 3 (dulu 2): dengan 2 titik pemain cepat bisa memadamkan semuanya dalam 8-15 detik
+     (menang 95-100% dalam ronde sangat singkat), terutama di portrait.
+   - R minimum 3,3 sel (dulu 3,0): grid portrait 24 kolom memberi bom lebih kecil daripada desktop (3,36). */
 const TAU = Math.PI * 2;
 const HA = 2;            // hektar per sel
 const TICK = 1;          // api menyebar tiap 1 detik
@@ -167,6 +174,9 @@ const CD = 2.2;          // isi ulang pesawat (detik)
 const BASE = 0.2;        // peluang dasar api merambat per tick
 const KEY = 'pemadam-hutan-terbaik';
 const DPR = Math.min(window.devicePixelRatio || 1, 2);
+const RM = window.matchMedia ? matchMedia('(prefers-reduced-motion: reduce)') : null;
+let reduce = !!(RM && RM.matches);
+if (RM && RM.addEventListener) RM.addEventListener('change', e => { reduce = e.matches; });
 const DX = [-1,0,1,-1,1,-1,0,1], DY = [-1,-1,-1,0,0,1,1,1], LEN = [1.414,1,1.414,1,1,1.414,1,1.414];
 const NAMES = ['Utara','Timur Laut','Timur','Tenggara','Selatan','Barat Daya','Barat','Barat Laut'];
 const OUT = '#1d4a2b', INK = '#2b1d12';
@@ -194,7 +204,14 @@ cc.width = 46 * DPR; cc.height = 46 * DPR;
 /* ---------- state ---------- */
 let cols = 44, rows = 28, N = 0, cs = 20, W = 0, H = 0, R = 3.3;
 let st, wet, burnLeft, burnTot, vis, ashA, wv, variant, sc, jx, jy, seedA, flam, pendFlag;
-let cm, cl, cms, cls;
+let cm, cl, ci;
+const TQ = 12, BQ = 3, PAL_M = [], PAL_L = [];   // palet warna pohon terkuantisasi (dipakai cache sprite)
+for (let q = 0; q < TQ * BQ; q++) {
+  const t = ((q / BQ) | 0) / (TQ - 1), b = .94 + (q % BQ) * .06;
+  PAL_M.push(mixA(LUSH, DRY, t).map(v => clamp(v * b, 0, 255)));
+  PAL_L.push(mixA(LUSH_L, DRY_L, t).map(v => clamp(v * b, 0, 255)));
+}
+const sprites = new Map();
 let lakes = [], tufts = [], windP = [];
 let pend = [], parts = [], texts = [], planes = [], bombs = [], rings = [];
 let aliveC = 0, burnC = 0, ashC = 0, totalTrees = 0, dropsUsed = 0;
@@ -227,7 +244,7 @@ function newWorld() {
   vis = new Float32Array(N); ashA = new Float32Array(N); wv = new Float32Array(N);
   variant = new Uint8Array(N); sc = new Float32Array(N); jx = new Float32Array(N); jy = new Float32Array(N);
   seedA = new Float32Array(N); flam = new Float32Array(N); pendFlag = new Uint8Array(N);
-  cm = new Array(N); cl = new Array(N); cms = new Array(N); cls = new Array(N);
+  cm = new Array(N); cl = new Array(N); ci = new Uint8Array(N);
 
   lakes = [];
   const base = Math.min(cols, rows), nl = 2 + (rnd() < .5 ? 1 : 0);
@@ -252,10 +269,9 @@ function newWorld() {
     sc[i] = rr(.9, 1.12); jx[i] = rr(-.1, .1); jy[i] = rr(-.07, .05); seedA[i] = rnd() * TAU;
     const d = nz(x, y);
     flam[i] = .75 + .6 * d;
-    const t = clamp((d - .2) / .6 + rr(-.08, .08), 0, 1), b = rr(.94, 1.06);
-    cm[i] = mixA(LUSH, DRY, t).map(v => clamp(v * b, 0, 255));
-    cl[i] = mixA(LUSH_L, DRY_L, t).map(v => clamp(v * b, 0, 255));
-    cms[i] = rgb(cm[i]); cls[i] = rgb(cl[i]);
+    const t = clamp((d - .2) / .6 + rr(-.08, .08), 0, 1);
+    ci[i] = Math.round(t * (TQ - 1)) * BQ + (rnd() * BQ | 0);
+    cm[i] = PAL_M[ci[i]]; cl[i] = PAL_L[ci[i]];
   }
 
   tufts = [];
@@ -264,7 +280,7 @@ function newWorld() {
   pend = []; parts = []; texts = []; planes = []; bombs = []; rings = [];
   cd = 0; playT = 0; tickAcc = 0; dropsUsed = 0; totalTrees = aliveC;
   wind.ang = rnd() * TAU; wind.tgt = wind.ang; wind.str = wind.tgtStr = rr(.9, 1.2); wind.timer = 10;
-  R = Math.max(3, Math.min(cols, rows) * .12);
+  R = Math.max(3.3, Math.min(cols, rows) * .12);   // portrait (24 kolom) dulu hanya 3,0
   dispSaved = aliveC * HA; lastSv = lastBt = lastFr = -1; lastCdState = null;
 }
 
@@ -276,6 +292,7 @@ function resize() {
   const old = cs;
   cs = Math.max(4, Math.min(a.w / cols, a.h / rows));
   W = cols * cs; H = rows * cs;
+  if (cs !== old) { sprites.clear(); atlas = null; }
   const k = cs / old;
   if (k !== 1) {
     // jaga posisi objek tetap di sel yang sama
@@ -327,6 +344,18 @@ function renderBg() {
       c.beginPath(); c.arc(cx + (k - 1) * rx * .45, cy + (k % 2 ? .22 : -.22) * ry, cs * .35, Math.PI * 1.1, Math.PI * 1.9); c.stroke();
     }
   }
+  for (let i = 0; i < N; i++) if (st[i] === 2 && ashA[i] >= 1) drawAsh(c, i, 1);
+}
+
+// abu yang sudah pekat digambar sekali ke latar statis, bukan tiap frame
+function drawAsh(c, i, a) {
+  const s = cs, x0 = (i % cols) * s, y0 = ((i / cols) | 0) * s;
+  c.globalAlpha = a * .92; c.fillStyle = '#4a3b36'; rrect(c, x0 + s * .04, y0 + s * .08, s * .92, s * .86, s * .26); c.fill();
+  c.globalAlpha = a * .6; c.fillStyle = '#6a5750';
+  c.beginPath(); c.ellipse(x0 + s * (.3 + (i % 3) * .15), y0 + s * .5, s * .15, s * .08, 0, 0, TAU); c.fill();
+  c.globalAlpha = a; c.fillStyle = '#2f231f';
+  c.fillRect(x0 + s * .5 - s * .05, y0 + s * .66, s * .1, s * .2);
+  c.globalAlpha = 1;
 }
 
 /* ---------- api ---------- */
@@ -344,7 +373,9 @@ function startFire() {
   const wx = Math.cos(wind.ang), wy = Math.sin(wind.ang);
   const spots = [
     [cols / 2 - wx * cols * .3 + rr(-3, 3), rows / 2 - wy * rows * .3 + rr(-3, 3)],
-    [cols / 2 - wx * cols * .25 - wy * rows * .22, rows / 2 - wy * rows * .25 + wx * cols * .12]
+    [cols / 2 - wx * cols * .25 - wy * rows * .22, rows / 2 - wy * rows * .25 + wx * cols * .12],
+    // titik ketiga di sisi seberang: dengan dua titik, pemain cepat bisa memadamkan semuanya dalam ~10 detik
+    [cols / 2 - wx * cols * .25 + wy * rows * .22, rows / 2 - wy * rows * .25 - wx * cols * .12]
   ];
   for (const [sx, sy] of spots) {
     const gx = clamp(Math.round(sx), 2, cols - 3), gy = clamp(Math.round(sy), 2, rows - 3);
@@ -483,7 +514,7 @@ function setPause(on) {
 }
 
 function endGame() {
-  phase = 'ended';
+  phase = 'ended'; cd = 0;
   const saved = aliveC * HA, total = totalTrees * HA;
   const pct = total ? Math.round(saved / total * 100) : 0;
   const stars = pct >= 75 ? 3 : pct >= 50 ? 2 : pct >= 25 ? 1 : 0;
@@ -529,7 +560,7 @@ function update(dt) {
         parts.push({ k: 'e', x: (x + .5) * cs, y: (y + .3) * cs, vx: wx * rr(40, 110) * wind.str + rr(-12, 12), vy: -rr(30, 80) + wy * 40, l: 0, m: rr(.7, 1.3), r: cs * .06 });
       }
     } else if (vis[i] > 0) vis[i] = Math.max(0, vis[i] - dt * 2.5);
-    if (st[i] === 2 && ashA[i] < 1) ashA[i] = Math.min(1, ashA[i] + dt * 1.2);
+    if (st[i] === 2 && ashA[i] < 1) { ashA[i] = Math.min(1, ashA[i] + dt * 1.2); if (ashA[i] >= 1) drawAsh(bctx, i, 1); }
     wv[i] += ((wet[i] > 0 ? 1 : 0) - wv[i]) * Math.min(1, dt * 5);
   }
 
@@ -608,10 +639,10 @@ function drawCompass() {
 }
 
 /* ---------- gambar ---------- */
-function rrect(x, y, w, h, r) {
-  ctx.beginPath(); ctx.moveTo(x + r, y);
-  ctx.arcTo(x + w, y, x + w, y + h, r); ctx.arcTo(x + w, y + h, x, y + h, r);
-  ctx.arcTo(x, y + h, x, y, r); ctx.arcTo(x, y, x + w, y, r); ctx.closePath();
+function rrect(c, x, y, w, h, r) {
+  c.beginPath(); c.moveTo(x + r, y);
+  c.arcTo(x + w, y, x + w, y + h, r); c.arcTo(x + w, y + h, x, y + h, r);
+  c.arcTo(x, y + h, x, y, r); c.arcTo(x, y, x + w, y, r); c.closePath();
 }
 
 function flamePath(x, y, w, h, ph, t) {
@@ -628,49 +659,82 @@ function flame(x, y, w, h, ph, t) {
   flamePath(x, y - h * .02, w * .52, h * .62, ph + 1, t); ctx.fillStyle = '#ffd83d'; ctx.fill();
 }
 
-function tri(ax, ay, hw, by) {
-  ctx.beginPath(); ctx.moveTo(ax, ay); ctx.lineTo(ax + hw, by); ctx.lineTo(ax - hw, by); ctx.closePath();
+function tri(c, ax, ay, hw, by) {
+  c.beginPath(); c.moveTo(ax, ay); c.lineTo(ax + hw, by); c.lineTo(ax - hw, by); c.closePath();
 }
 
-function plant(bx, by, v, k, main, light, sway, out) {
+// part: 1 = batang, 2 = tajuk, 3 = keduanya
+function plant(bx, by, v, k, main, light, sway, out, c = ctx, part = 3) {
   const s = cs;
-  ctx.lineJoin = 'round'; ctx.lineWidth = s * .055; ctx.strokeStyle = out;
+  c.lineJoin = 'round'; c.lineWidth = s * .055; c.strokeStyle = out;
   if (v === 0) {
     const tw = s * .15 * k, th = s * .3 * k;
-    ctx.fillStyle = '#8a5a2b'; ctx.fillRect(bx - tw / 2, by - th, tw, th); ctx.strokeRect(bx - tw / 2, by - th, tw, th);
+    if (part & 1) { c.fillStyle = '#8a5a2b'; c.fillRect(bx - tw / 2, by - th, tw, th); c.strokeRect(bx - tw / 2, by - th, tw, th); }
+    if (!(part & 2)) return;
     const cx = bx + sway, cy = by - th - s * .16 * k, r = s * .4 * k;
-    ctx.beginPath(); ctx.arc(cx, cy, r, 0, TAU); ctx.fillStyle = main; ctx.fill(); ctx.stroke();
-    ctx.beginPath(); ctx.arc(cx - r * .3, cy - r * .32, r * .38, 0, TAU); ctx.fillStyle = light; ctx.fill();
+    c.beginPath(); c.arc(cx, cy, r, 0, TAU); c.fillStyle = main; c.fill(); c.stroke();
+    c.beginPath(); c.arc(cx - r * .3, cy - r * .32, r * .38, 0, TAU); c.fillStyle = light; c.fill();
   } else if (v === 1) {
     const tw = s * .12 * k, th = s * .18 * k;
-    ctx.fillStyle = '#8a5a2b'; ctx.fillRect(bx - tw / 2, by - th, tw, th); ctx.strokeRect(bx - tw / 2, by - th, tw, th);
+    if (part & 1) { c.fillStyle = '#8a5a2b'; c.fillRect(bx - tw / 2, by - th, tw, th); c.strokeRect(bx - tw / 2, by - th, tw, th); }
+    if (!(part & 2)) return;
     const cx = bx + sway * .8, b1 = by - th * .7;
-    tri(cx, b1 - s * .6 * k, s * .4 * k, b1); ctx.fillStyle = main; ctx.fill(); ctx.stroke();
-    tri(cx + sway * .3, b1 - s * .98 * k, s * .3 * k, b1 - s * .32 * k); ctx.fillStyle = light; ctx.fill(); ctx.stroke();
+    tri(c, cx, b1 - s * .6 * k, s * .4 * k, b1); c.fillStyle = main; c.fill(); c.stroke();
+    tri(c, cx + sway * .3, b1 - s * .98 * k, s * .3 * k, b1 - s * .32 * k); c.fillStyle = light; c.fill(); c.stroke();
   } else {
+    if (!(part & 2)) return;
     const base = by - s * .28 * k, sk = s * k, X = bx + sway;
     const C = [[-.2, .04, .26], [.2, .04, .26], [0, -.14, .3]];
-    ctx.fillStyle = out;
-    for (const c of C) { ctx.beginPath(); ctx.arc(X + c[0] * sk, base + c[1] * sk, c[2] * sk + s * .03, 0, TAU); ctx.fill(); }
-    ctx.fillStyle = main;
-    for (const c of C) { ctx.beginPath(); ctx.arc(X + c[0] * sk, base + c[1] * sk, c[2] * sk, 0, TAU); ctx.fill(); }
-    ctx.fillStyle = light; ctx.beginPath(); ctx.arc(X - .1 * sk, base - .22 * sk, .12 * sk, 0, TAU); ctx.fill();
+    c.fillStyle = out;
+    for (const q of C) { c.beginPath(); c.arc(X + q[0] * sk, base + q[1] * sk, q[2] * sk + s * .03, 0, TAU); c.fill(); }
+    c.fillStyle = main;
+    for (const q of C) { c.beginPath(); c.arc(X + q[0] * sk, base + q[1] * sk, q[2] * sk, 0, TAU); c.fill(); }
+    c.fillStyle = light; c.beginPath(); c.arc(X - .1 * sk, base - .22 * sk, .12 * sk, 0, TAU); c.fill();
   }
+}
+
+// cache sprite pohon kering (bukan basah/terbakar) dalam satu atlas: [bayangan+batang, tajuk] per varian
+// dan warna palet. Digambar sekali pada skala 1,15x lalu di-drawImage; tajuk tetap bergoyang lewat offset.
+const SX0 = -.62, SX1 = .62, SY0 = -1.24, SY1 = .2, ACOLS = 24;
+let atlas = null, slotW = 0, slotH = 0, slotN = 0;
+function treeSprite(v, q) {
+  const key = v * 64 + q;
+  let e = sprites.get(key);
+  if (e) return e;
+  const Q = DPR * 1.15;
+  if (!atlas) {
+    slotW = Math.ceil((SX1 - SX0) * cs * Q) + 2; slotH = Math.ceil((SY1 - SY0) * cs * Q) + 2; slotN = 0;
+    atlas = document.createElement('canvas');
+    atlas.width = slotW * ACOLS; atlas.height = slotH * Math.ceil(3 * TQ * BQ * 2 / ACOLS);
+  }
+  const c = atlas.getContext('2d'), main = rgb(PAL_M[q]), light = rgb(PAL_L[q]);
+  e = [];
+  for (let part = 1; part <= 2; part++) {
+    const sx = (slotN % ACOLS) * slotW, sy = ((slotN / ACOLS) | 0) * slotH; slotN++;
+    c.setTransform(Q, 0, 0, Q, sx + 1 - SX0 * cs * Q, sy + 1 - SY0 * cs * Q);
+    if (part === 1) { c.fillStyle = 'rgba(35,80,35,.2)'; c.beginPath(); c.ellipse(0, 0, cs * .32, cs * .09, 0, 0, TAU); c.fill(); }
+    plant(0, 0, v, 1, main, light, 0, OUT, c, part);
+    e.push(sx + 1, sy + 1);
+  }
+  e.push(slotW - 2, slotH - 2);
+  sprites.set(key, e);
+  return e;
 }
 
 function drawCell(i, x0, y0, tt) {
   const s = cs, k = sc[i], w = wv[i];
   const bx = x0 + s * .5 + jx[i] * s, by = y0 + s * .92 + jy[i] * s;
   const sway = Math.sin(tt * 2.1 + seedA[i]) * s * .028 * (.5 + wind.str * .5);
-  if (w > .02) {
-    ctx.fillStyle = 'rgba(70,165,240,' + (.38 * w).toFixed(3) + ')';
-    ctx.beginPath(); ctx.ellipse(bx, by, s * .46, s * .17, 0, 0, TAU); ctx.fill();
-  } else {
-    ctx.fillStyle = 'rgba(35,80,35,.2)';
-    ctx.beginPath(); ctx.ellipse(bx, by, s * .32 * k, s * .09 * k, 0, 0, TAU); ctx.fill();
+  if (w <= .02) {
+    const sp = treeSprite(variant[i], ci[i]), dw = (SX1 - SX0) * s * k, dh = (SY1 - SY0) * s * k;
+    const dx = bx + SX0 * s * k, dy = by + SY0 * s * k;
+    ctx.drawImage(atlas, sp[0], sp[1], sp[4], sp[5], dx, dy, dw, dh);
+    ctx.drawImage(atlas, sp[2], sp[3], sp[4], sp[5], dx + (variant[i] === 1 ? sway * .8 : sway), dy, dw, dh);
+    return;
   }
-  let main = cms[i], light = cls[i];
-  if (w > .02) { main = rgb(mixA(cm[i], WETC, .5 * w)); light = rgb(mixA(cl[i], WETL, .5 * w)); }
+  ctx.fillStyle = 'rgba(70,165,240,' + (.38 * w).toFixed(3) + ')';
+  ctx.beginPath(); ctx.ellipse(bx, by, s * .46, s * .17, 0, 0, TAU); ctx.fill();
+  const main = rgb(mixA(cm[i], WETC, .5 * w)), light = rgb(mixA(cl[i], WETL, .5 * w));
   plant(bx, by, variant[i], k, main, light, sway, OUT);
   if (w > .4) {
     const ph = (tt * 1.3 + seedA[i]) % 1;
@@ -693,22 +757,12 @@ function drawBurning(i, x0, y0, tt) {
 }
 
 function draw() {
-  const c = ctx, s = cs, tt = gt;
+  const c = ctx, s = cs, tt = reduce ? 0 : gt;   // gerak berkurang: pohon diam, api tidak berkedip
   c.setTransform(DPR, 0, 0, DPR, 0, 0);
   c.drawImage(bg, 0, 0, W, H);
 
-  // bekas terbakar
-  for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
-    const i = y * cols + x;
-    if (st[i] !== 2 || ashA[i] <= 0) continue;
-    const a = ashA[i], x0 = x * s, y0 = y * s;
-    c.globalAlpha = a * .92; c.fillStyle = '#4a3b36'; rrect(x0 + s * .04, y0 + s * .08, s * .92, s * .86, s * .26); c.fill();
-    c.globalAlpha = a * .6; c.fillStyle = '#6a5750';
-    c.beginPath(); c.ellipse(x0 + s * (.3 + (i % 3) * .15), y0 + s * .5, s * .15, s * .08, 0, 0, TAU); c.fill();
-    c.globalAlpha = a; c.fillStyle = '#2f231f';
-    c.fillRect(x0 + s * .5 - s * .05, y0 + s * .66, s * .1, s * .2);
-  }
-  c.globalAlpha = 1;
+  // bekas terbakar yang masih memudar masuk (yang sudah pekat ada di latar)
+  for (let i = 0; i < N; i++) if (st[i] === 2 && ashA[i] > 0 && ashA[i] < 1) drawAsh(c, i, ashA[i]);
 
   // pohon, api (urut baris supaya tumpang tindih terlihat benar)
   for (let y = 0; y < rows; y++) for (let x = 0; x < cols; x++) {
@@ -725,7 +779,7 @@ function draw() {
   // angin
   c.lineCap = 'round'; c.lineWidth = 2; c.strokeStyle = 'rgba(255,255,255,.55)';
   const wx = Math.cos(wind.ang), wy = Math.sin(wind.ang);
-  for (const p of windP) {
+  if (!reduce) for (const p of windP) {
     const len = p.l * (.6 + wind.str * .5), bend = Math.sin(gt * 2 + p.ph) * 6;
     c.beginPath(); c.moveTo(p.x, p.y);
     c.quadraticCurveTo(p.x - wx * len * .5 - wy * bend, p.y - wy * len * .5 + wx * bend, p.x - wx * len, p.y - wy * len);
@@ -768,13 +822,13 @@ function draw() {
   if (hover && hoverType === 'mouse' && phase === 'playing') {
     c.save(); c.globalAlpha = cd > 0 ? .4 : 1;
     c.fillStyle = 'rgba(80,170,255,.14)'; c.strokeStyle = 'rgba(255,255,255,.95)'; c.lineWidth = 2.5;
-    c.setLineDash([7, 7]); c.lineDashOffset = -gt * 14;
+    c.setLineDash([7, 7]); c.lineDashOffset = -tt * 14;
     c.beginPath(); c.arc(hover.x, hover.y, R * s, 0, TAU); c.fill(); c.stroke(); c.restore();
   }
   for (const p of planes) {
     if (p.dropped) continue;
-    c.save(); c.strokeStyle = 'rgba(255,255,255,.95)'; c.lineWidth = 3; c.setLineDash([8, 6]); c.lineDashOffset = -gt * 30;
-    c.beginPath(); c.arc(p.tx, p.ty, R * s * (1 + .04 * Math.sin(gt * 10)), 0, TAU); c.stroke(); c.restore();
+    c.save(); c.strokeStyle = 'rgba(255,255,255,.95)'; c.lineWidth = 3; c.setLineDash([8, 6]); c.lineDashOffset = -tt * 30;
+    c.beginPath(); c.arc(p.tx, p.ty, R * s * (1 + .04 * Math.sin(tt * 10)), 0, TAU); c.stroke(); c.restore();
   }
 
   for (const p of planes) drawPlane(p);
