@@ -2,6 +2,10 @@
 
 Menampilkan game `pemadam-hutan.html` di halaman atau post WordPress lewat shortcode.
 
+## Unduh
+
+**[Unduh pemadam-hutan.zip](https://github.com/mangkuparasdyo-code/mangku-claude-test/raw/pemadam-hutan/wordpress-plugin/pemadam-hutan.zip)** (siap pasang, tidak perlu diekstrak)
+
 ## Membuat zip
 
 ```bash
@@ -28,4 +32,4 @@ Game dimuat dalam iframe supaya CSS game tidak bentrok dengan tema.
 ## Memperbarui game
 
 Ubah `../pemadam-hutan.html`, naikkan `Version` dan `PEMADAM_HUTAN_VERSION` di `pemadam-hutan.php`
-(supaya browser tidak memakai versi lama dari cache), jalankan `./build.sh`, lalu unggah ulang zip-nya.
+(supaya browser tidak memakai versi lama dari cache), jalankan `./build.sh`, commit `pemadam-hutan.zip` yang baru, lalu unggah ulang zip-nya.
